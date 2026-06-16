@@ -1,5 +1,6 @@
 package com.fuddud
 
+import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -14,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
@@ -39,11 +41,16 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.fuddud.data.AppDatabase
 import com.fuddud.data.CalorieRepository
+import com.fuddud.data.CustomFood
 import com.fuddud.data.FoodLog
+import com.fuddud.network.NutrimentsDto
 import com.fuddud.network.ProductDto
 import com.fuddud.network.RetrofitClient
 import com.fuddud.viewmodel.CalorieViewModel
 import com.fuddud.viewmodel.ViewModelFactory
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 
 enum class Screen { Dashboard, Search, Settings }
 
@@ -52,19 +59,34 @@ class MainActivity : ComponentActivity() {
     private val viewModel: CalorieViewModel by viewModels {
         val database = AppDatabase.getDatabase(applicationContext)
         val repository = CalorieRepository(database.calorieDao(), database, RetrofitClient.api)
-        ViewModelFactory(repository)
+        val sharedPrefs = getSharedPreferences("fuddud_prefs", MODE_PRIVATE)
+        ViewModelFactory(repository, sharedPrefs)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+            val isDark = viewModel.isDarkTheme
+
+            // Реактивно меняем тему во всем приложении при изменении настройки
             MaterialTheme(
-                colorScheme = lightColorScheme(
-                    primary = Color(0xFF81C784),
-                    background = Color(0xFFF7F9FA),
-                    surface = Color(0xFFFFFFFF),
-                    onBackground = Color(0xFF1C1B1F)
-                )
+                colorScheme = if (isDark) {
+                    darkColorScheme(
+                        primary = Color(0xFF81C784),
+                        background = Color(0xFF121212),
+                        surface = Color(0xFF1E1E1E),
+                        onBackground = Color(0xFFFFFFFF),
+                        onSurface = Color(0xFFFFFFFF)
+                    )
+                } else {
+                    lightColorScheme(
+                        primary = Color(0xFF81C784),
+                        background = Color(0xFFF7F9FA),
+                        surface = Color(0xFFFFFFFF),
+                        onBackground = Color(0xFF1C1B1F),
+                        onSurface = Color(0xFF1C1B1F)
+                    )
+                }
             ) {
                 MainAppScreen(viewModel)
             }
@@ -132,7 +154,7 @@ fun DashboardScreen(viewModel: CalorieViewModel) {
                 text = "Сводка за сегодня",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF2D3142)
+                color = MaterialTheme.colorScheme.onBackground
             )
         }
 
@@ -155,9 +177,9 @@ fun DashboardScreen(viewModel: CalorieViewModel) {
                     )
                     Spacer(modifier = Modifier.width(24.dp))
                     Column {
-                        Text("Белки: ${dailyTotal.protein.toInt()} г", fontSize = 14.sp)
-                        Text("Жиры: ${dailyTotal.fat.toInt()} г", fontSize = 14.sp)
-                        Text("Углеводы: ${dailyTotal.carbs.toInt()} г", fontSize = 14.sp)
+                        Text("Белки: ${dailyTotal.protein.toInt()} г / ${viewModel.targetProtein.toInt()} г", fontSize = 14.sp)
+                        Text("Жиры: ${dailyTotal.fat.toInt()} г / ${viewModel.targetFat.toInt()} г", fontSize = 14.sp)
+                        Text("Углеводы: ${dailyTotal.carbs.toInt()} г / ${viewModel.targetCarbs.toInt()} г", fontSize = 14.sp)
                     }
                 }
             }
@@ -193,7 +215,7 @@ fun DashboardScreen(viewModel: CalorieViewModel) {
                 text = "Дневник питания",
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp,
-                color = Color(0xFF2D3142)
+                color = MaterialTheme.colorScheme.onBackground
             )
         }
 
@@ -231,11 +253,11 @@ fun LogItem(log: FoodLog, onDelete: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(log.name, fontWeight = FontWeight.Bold)
+                Text(log.name, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                 Text("${log.weightGrams.toInt()} г • Б: ${log.protein.toInt()} Ж: ${log.fat.toInt()} У: ${log.carbs.toInt()}", fontSize = 12.sp, color = Color.Gray)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${log.calories.toInt()} ккал", fontWeight = FontWeight.Bold, modifier = Modifier.padding(end = 8.dp))
+                Text("${log.calories.toInt()} ккал", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.padding(end = 8.dp))
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = Color.Red.copy(alpha = 0.6f))
                 }
@@ -246,27 +268,83 @@ fun LogItem(log: FoodLog, onDelete: () -> Unit) {
 
 @Composable
 fun SearchScreen(viewModel: CalorieViewModel) {
-    var showDialog by remember { mutableStateOf<ProductDto?>(null) }
+    val context = LocalContext.current
+    var showWeightDialog by remember { mutableStateOf<ProductDto?>(null) }
+    var showCreateCustomDialog by remember { mutableStateOf(false) }
+    
+    val customFoods by viewModel.customFoods.collectAsState()
+
+    // Настройка GmsBarcodeScanner от Google (работает без разрешений в манифесте)
+    val barcodeScanner = remember {
+        val options = GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+            .enableAutoZoom()
+            .build()
+        GmsBarcodeScanning.getClient(context, options)
+    }
+
+    // Авто-открытие диалога ввода веса при успешном сканировании
+    LaunchedEffect(viewModel.scannedProduct) {
+        viewModel.scannedProduct?.let {
+            showWeightDialog = it
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        OutlinedTextField(
-            value = viewModel.searchQuery,
-            onValueChange = { viewModel.searchQuery = it },
-            label = { Text("Поиск продуктов в сети") },
-            trailingIcon = {
-                IconButton(onClick = { viewModel.performSearch() }) {
-                    Icon(Icons.Default.Search, contentDescription = "Поиск")
-                }
-            },
+        // Поиск и Кнопка сканера
+        Row(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp)
-        )
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedTextField(
+                value = viewModel.searchQuery,
+                onValueChange = { viewModel.searchQuery = it },
+                label = { Text("Поиск продуктов") },
+                trailingIcon = {
+                    IconButton(onClick = { viewModel.performSearch() }) {
+                        Icon(Icons.Default.Search, contentDescription = "Поиск")
+                    }
+                },
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(16.dp)
+            )
 
-        Spacer(modifier = Modifier.height(16.dp))
+            // Кнопка сканера штрих-кода
+            Button(
+                onClick = {
+                    barcodeScanner.startScan()
+                        .addOnSuccessListener { barcode ->
+                            barcode.rawValue?.let { code ->
+                                viewModel.searchByBarcode(code)
+                            }
+                        }
+                        .addOnFailureListener {
+                            Toast.makeText(context, "Ошибка сканирования", Toast.LENGTH_SHORT).show()
+                        }
+                },
+                modifier = Modifier.height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                Text("Сканер", fontSize = 12.sp)
+            }
+        }
+
+        // Кнопка создания личного продукта
+        Button(
+            onClick = { showCreateCustomDialog = true },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f))
+        ) {
+            Text("Создать свой продукт", fontWeight = FontWeight.Bold)
+        }
 
         if (viewModel.isSearching) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
@@ -276,17 +354,71 @@ fun SearchScreen(viewModel: CalorieViewModel) {
             Text(it, color = Color.Red, modifier = Modifier.align(Alignment.CenterHorizontally))
         }
 
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(viewModel.searchResults) { product ->
-                ProductSearchItem(product = product, onClick = { showDialog = product })
+        // Список результатов
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f)
+        ) {
+            // Сначала показываем созданные пользователем продукты
+            if (customFoods.isNotEmpty()) {
+                item {
+                    Text("Свои продукты:", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
+                }
+                items(customFoods) { food ->
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                showWeightDialog = ProductDto(
+                                    code = null,
+                                    productName = food.name,
+                                    nutriments = NutrimentsDto(food.calories, food.protein, food.carbs, food.fat),
+                                    imageThumbUrl = null
+                                )
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(food.name, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                Text("${food.calories.toInt()} ккал • Б: ${food.protein.toInt()} Ж: ${food.fat.toInt()} У: ${food.carbs.toInt()}", fontSize = 12.sp, color = Color.Gray)
+                            }
+                            IconButton(onClick = { viewModel.removeCustomFood(food) }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = Color.Red.copy(alpha = 0.5f))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Поисковые продукты из интернета
+            if (viewModel.searchResults.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Найденное в сети:", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground)
+                }
+                items(viewModel.searchResults) { product ->
+                    ProductSearchItem(product = product, onClick = { showWeightDialog = product })
+                }
             }
         }
     }
 
-    showDialog?.let { product ->
+    // Диалог ввода веса продукта
+    showWeightDialog?.let { product ->
         WeightInputDialog(
             product = product,
-            onDismiss = { showDialog = null },
+            onDismiss = {
+                showWeightDialog = null
+                viewModel.scannedProduct = null
+            },
             onConfirm = { weight ->
                 viewModel.addLog(
                     name = product.productName ?: "Неизвестный продукт",
@@ -296,7 +428,19 @@ fun SearchScreen(viewModel: CalorieViewModel) {
                     fat100g = product.nutriments?.fat100g ?: 0.0,
                     weight = weight
                 )
-                showDialog = null
+                showWeightDialog = null
+                viewModel.scannedProduct = null
+            }
+        )
+    }
+
+    // Диалог создания своего продукта
+    if (showCreateCustomDialog) {
+        CreateCustomFoodDialog(
+            onDismiss = { showCreateCustomDialog = false },
+            onConfirm = { name, kcal, p, f, c ->
+                viewModel.saveCustomFood(name, kcal, p, f, c)
+                showCreateCustomDialog = false
             }
         )
     }
@@ -327,7 +471,7 @@ fun ProductSearchItem(product: ProductDto, onClick: () -> Unit) {
             )
             Spacer(modifier = Modifier.width(16.dp))
             Column {
-                Text(product.productName ?: "Без названия", fontWeight = FontWeight.Bold)
+                Text(product.productName ?: "Без названия", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                 Text("Калорийность: ${product.nutriments?.energyKcal100g?.toInt() ?: 0} ккал / 100г", fontSize = 12.sp, color = Color.Gray)
             }
         }
@@ -371,65 +515,187 @@ fun WeightInputDialog(product: ProductDto, onDismiss: () -> Unit, onConfirm: (Do
 }
 
 @Composable
+fun CreateCustomFoodDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (String, Double, Double, Double, Double) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    var kcal by remember { mutableStateOf("") }
+    var p by remember { mutableStateOf("") }
+    var f by remember { mutableStateOf("") }
+    var c by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Создать свой продукт") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Название") }, singleLine = true)
+                OutlinedTextField(value = kcal, onValueChange = { kcal = it }, label = { Text("Калории на 100г") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+                OutlinedTextField(value = p, onValueChange = { p = it }, label = { Text("Белки на 100г") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+                OutlinedTextField(value = f, onValueChange = { f = it }, label = { Text("Жиры на 100г") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+                OutlinedTextField(value = c, onValueChange = { c = it }, label = { Text("Углеводы на 100г") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (name.isNotBlank()) {
+                        onConfirm(
+                            name,
+                            kcal.toDoubleOrNull() ?: 0.0,
+                            p.toDoubleOrNull() ?: 0.0,
+                            f.toDoubleOrNull() ?: 0.0,
+                            c.toDoubleOrNull() ?: 0.0
+                        )
+                    }
+                }
+            ) {
+                Text("Сохранить")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        }
+    )
+}
+
+// --- НАСТРОЙКИ ПРОФИЛЯ, ЛИМИТОВ И ОЧИСТКА ---
+@Composable
 fun SettingsScreen(viewModel: CalorieViewModel) {
     val context = LocalContext.current
+    val isDark = viewModel.isDarkTheme
 
-    Column(
+    // Локальные состояния для формы редактирования целей
+    var editKcal by remember { mutableStateOf(viewModel.targetCalories.toInt().toString()) }
+    var editP by remember { mutableStateOf(viewModel.targetProtein.toInt().toString()) }
+    var editF by remember { mutableStateOf(viewModel.targetFat.toInt().toString()) }
+    var editC by remember { mutableStateOf(viewModel.targetCarbs.toInt().toString()) }
+
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text(
-            "Обслуживание памяти",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            color = Color(0xFF2D3142)
-        )
-        Text(
-            "Приложение автоматически хранит данные. Ниже вы можете очистить временные файлы для освобождения памяти устройства.",
-            color = Color.Gray,
-            fontSize = 14.sp
-        )
+        item {
+            Text(
+                "Настройки и память",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+        }
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("Кэш изображений", fontWeight = FontWeight.Bold)
-                Text("Очищает временные эскизы продуктов, загруженных при поиске в интернете.", fontSize = 12.sp, color = Color.Gray)
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = {
-                        viewModel.clearCache(context)
-                        Toast.makeText(context, "Кэш Coil очищен", Toast.LENGTH_SHORT).show()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+        // 1. Выбор темы
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Очистить кэш картинок")
+                    Column {
+                        Text("Тёмная тема", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Переключить тему оформления", fontSize = 12.sp, color = Color.Gray)
+                    }
+                    Switch(
+                        checked = isDark,
+                        onCheckedChange = { viewModel.toggleTheme(it) }
+                    )
                 }
             }
         }
 
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("Сжатие и архивация данных", fontWeight = FontWeight.Bold)
-                Text("Сжимает базу данных. Детальная история старше 30 дней переносится в архив (взамен удаляются подробные списки продуктов за прошлый месяц, чтобы не засорять диск, но графики сохранятся).", fontSize = 12.sp, color = Color.Gray)
-                Spacer(modifier = Modifier.height(12.dp))
-                Button(
-                    onClick = {
-                        viewModel.optimizeDatabase(context)
-                        Toast.makeText(context, "База данных оптимизирована (VACUUM)", Toast.LENGTH_SHORT).show()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
-                    Text("Оптимизировать память базы")
+        // 2. Редактирование целей (нормы питания)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Дневная норма питания", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    
+                    OutlinedTextField(
+                        value = editKcal,
+                        onValueChange = { editKcal = it },
+                        label = { Text("Калории (ккал)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(value = editP, onValueChange = { editP = it }, label = { Text("Белки") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = editF, onValueChange = { editF = it }, label = { Text("Жиры") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = editC, onValueChange = { editC = it }, label = { Text("Углеводы") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, modifier = Modifier.weight(1f))
+                    }
+
+                    Button(
+                        onClick = {
+                            viewModel.updateGoals(
+                                editKcal.toDoubleOrNull() ?: 2000.0,
+                                editP.toDoubleOrNull() ?: 130.0,
+                                editF.toDoubleOrNull() ?: 65.0,
+                                editC.toDoubleOrNull() ?: 230.0
+                            )
+                            Toast.makeText(context, "Цели сохранены", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Сохранить изменения")
+                    }
+                }
+            }
+        }
+
+        // 3. Кэш изображений
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Кэш изображений", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Очищает временные эскизы продуктов, загруженных при поиске в интернете.", fontSize = 12.sp, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            viewModel.clearCache(context)
+                            Toast.makeText(context, "Кэш картинок очищен", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Text("Очистить кэш картинок")
+                    }
+                }
+            }
+        }
+
+        // 4. Оптимизация БД
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Сжатие и архивация данных", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    Text("Сжимает базу данных. Детальная история старше 30 дней переносится в архив (взамен удаляются подробные списки продуктов за прошлый месяц, чтобы не засорять диск, но графики сохранятся).", fontSize = 12.sp, color = Color.Gray)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            viewModel.optimizeDatabase(context)
+                            Toast.makeText(context, "База данных оптимизирована (VACUUM)", Toast.LENGTH_SHORT).show()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Text("Оптимизировать память базы")
+                    }
                 }
             }
         }
@@ -533,7 +799,7 @@ fun CalorieProgressRing(
                 text = "${consumed.toInt()}",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF2D3142)
+                color = MaterialTheme.colorScheme.onBackground
             )
             Text(
                 text = "/ ${target.toInt()}",
