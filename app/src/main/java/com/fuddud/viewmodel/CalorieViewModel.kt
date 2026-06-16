@@ -1,6 +1,7 @@
 package com.fuddud.viewmodel
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.compose.runtime.*
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -21,13 +22,62 @@ data class DailyTotal(
     val fat: Double = 0.0
 )
 
-class CalorieViewModel(private val repository: CalorieRepository) : ViewModel() {
+class CalorieViewModel(
+    private val repository: CalorieRepository,
+    private val prefs: SharedPreferences
+) : ViewModel() {
 
     private val _selectedDate = MutableStateFlow(System.currentTimeMillis())
     val selectedDate: StateFlow<Long> = _selectedDate.asStateFlow()
 
-    val targetCalories = 2000.0
+    // --- Настройки профиля (считывание из SharedPreferences) ---
+    var isDarkTheme by mutableStateOf(prefs.getBoolean("is_dark_theme", false))
+        private set
 
+    var targetCalories by mutableStateOf(prefs.getFloat("target_calories", 2000f).toDouble())
+        private set
+    var targetProtein by mutableStateOf(prefs.getFloat("target_protein", 130f).toDouble())
+        private set
+    var targetCarbs by mutableStateOf(prefs.getFloat("target_carbs", 230f).toDouble())
+        private set
+    var targetFat by mutableStateOf(prefs.getFloat("target_fat", 65f).toDouble())
+        private set
+
+    fun toggleTheme(isDark: Boolean) {
+        isDarkTheme = isDark
+        prefs.edit().putBoolean("is_dark_theme", isDark).apply()
+    }
+
+    fun updateGoals(calories: Double, protein: Double, carbs: Double, fat: Double) {
+        targetCalories = calories
+        targetProtein = protein
+        targetCarbs = carbs
+        targetFat = fat
+        prefs.edit()
+            .putFloat("target_calories", calories.toFloat())
+            .putFloat("target_protein", protein.toFloat())
+            .putFloat("target_carbs", carbs.toFloat())
+            .putFloat("target_fat", fat.toFloat())
+            .apply()
+    }
+
+    // --- Собственные локальные продукты ---
+    val customFoods: StateFlow<List<CustomFood>> = repository.getAllCustomFoods()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun saveCustomFood(name: String, calories: Double, protein: Double, carbs: Double, fat: Double) {
+        viewModelScope.launch {
+            repository.insertCustomFood(CustomFood(name = name, calories = calories, protein = protein, carbs = carbs, fat = fat))
+        }
+    }
+
+    fun removeCustomFood(food: CustomFood) {
+        viewModelScope.launch {
+            repository.deleteCustomFood(food)
+        }
+    }
+
+    // --- Калории и логи питания ---
     fun changeDate(date: Long) {
         _selectedDate.value = date
     }
@@ -77,21 +127,47 @@ class CalorieViewModel(private val repository: CalorieRepository) : ViewModel() 
         list
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    // --- Сетевой поиск ---
     var searchQuery by mutableStateOf("")
     var searchResults by mutableStateOf<List<ProductDto>>(emptyList())
     var isSearching by mutableStateOf(false)
     var searchError by mutableStateOf<String?>(null)
+
+    // Хранение найденного по штрих-коду продукта для автооткрытия диалога ввода веса
+    var scannedProduct by mutableStateOf<ProductDto?>(null)
 
     fun performSearch() {
         if (searchQuery.isBlank()) return
         viewModelScope.launch {
             isSearching = true
             searchError = null
+            scannedProduct = null
             try {
                 val response = repository.searchOnline(searchQuery)
                 searchResults = response.products ?: emptyList()
             } catch (e: Exception) {
                 searchError = "Ошибка подключения"
+            } finally {
+                isSearching = false
+            }
+        }
+    }
+
+    // Логика сканирования штрих-кода
+    fun searchByBarcode(barcode: String) {
+        viewModelScope.launch {
+            isSearching = true
+            searchError = null
+            scannedProduct = null
+            try {
+                val response = repository.searchBarcodeOnline(barcode)
+                if (response.status == 1 && response.product != null) {
+                    scannedProduct = response.product
+                } else {
+                    searchError = "Продукт со штрих-кодом $barcode не найден"
+                }
+            } catch (e: Exception) {
+                searchError = "Ошибка сетевого поиска по штрих-коду"
             } finally {
                 isSearching = false
             }
@@ -152,11 +228,14 @@ class CalorieViewModel(private val repository: CalorieRepository) : ViewModel() 
     }
 }
 
-class ViewModelFactory(private val repository: CalorieRepository) : ViewModelProvider.Factory {
+class ViewModelFactory(
+    private val repository: CalorieRepository,
+    private val prefs: SharedPreferences
+) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(CalorieViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return CalorieViewModel(repository) as T
+            return CalorieViewModel(repository, prefs) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }
