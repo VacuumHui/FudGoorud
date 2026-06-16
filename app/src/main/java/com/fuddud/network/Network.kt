@@ -4,10 +4,18 @@ import com.google.gson.annotations.SerializedName
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
+import retrofit2.http.Path
 import retrofit2.http.Query
 
 data class SearchResponse(
     @SerializedName("products") val products: List<ProductDto>?
+)
+
+// Ответ API при поиске по штрих-коду
+data class BarcodeResponse(
+    @SerializedName("code") val code: String?,
+    @SerializedName("product") val product: ProductDto?,
+    @SerializedName("status") val status: Int? // 1 - найден, 0 - не найден
 )
 
 data class ProductDto(
@@ -33,6 +41,13 @@ interface OpenFoodFactsApi {
         @Query("json") json: Int = 1,
         @Query("fields") fields: String = "product_name,nutriments,image_thumb_url,code"
     ): SearchResponse
+
+    // Новый метод поиска по штрих-коду v2
+    @GET("api/v2/product/{barcode}.json")
+    suspend fun getProductByBarcode(
+        @Path("barcode") barcode: String,
+        @Query("fields") fields: String = "product_name,nutriments,image_thumb_url,code"
+    ): BarcodeResponse
 }
 
 object RetrofitClient {
@@ -44,5 +59,5 @@ object RetrofitClient {
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(OpenFoodFactsApi::class.java)
-        }
+    }
 }
