@@ -1,6 +1,7 @@
 package com.fuddud.data
 
 import android.content.Context
+import com.fuddud.network.BarcodeResponse
 import com.fuddud.network.OpenFoodFactsApi
 import com.fuddud.network.SearchResponse
 import kotlinx.coroutines.Dispatchers
@@ -25,9 +26,24 @@ class CalorieRepository(
 
     suspend fun deleteLog(log: FoodLog) = dao.deleteLog(log)
 
+    // Работа со своими продуктами
+    fun getAllCustomFoods(): Flow<List<CustomFood>> = dao.getAllCustomFoods()
+
+    suspend fun insertCustomFood(food: CustomFood) = dao.insertCustomFood(food)
+
+    suspend fun deleteCustomFood(food: CustomFood) = dao.deleteCustomFood(food)
+
+    // Текстовый поиск
     suspend fun searchOnline(query: String): SearchResponse {
         return withContext(Dispatchers.IO) {
             api.searchProducts(query)
+        }
+    }
+
+    // Поиск по штрих-коду
+    suspend fun searchBarcodeOnline(barcode: String): BarcodeResponse {
+        return withContext(Dispatchers.IO) {
+            api.getProductByBarcode(barcode)
         }
     }
 
