@@ -71,4 +71,7 @@ dependencies {
 
     // Coil (Загрузка картинок)
     implementation("io.coil-kt:coil-compose:2.6.0")
+
+    //Сканер штрих-кода 
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
 }
