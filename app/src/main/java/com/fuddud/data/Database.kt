@@ -25,6 +25,17 @@ data class DailySummary(
     val fat: Double
 )
 
+// Новая таблица для пользовательских локальных продуктов
+@Entity(tableName = "custom_foods")
+data class CustomFood(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val calories: Double, // на 100г
+    val protein: Double,  // на 100г
+    val carbs: Double,    // на 100г
+    val fat: Double       // на 100г
+)
+
 @Dao
 interface CalorieDao {
     @Insert
@@ -53,9 +64,20 @@ interface CalorieDao {
 
     @Query("SELECT * FROM daily_summaries ORDER BY date ASC")
     fun getAllSummaries(): Flow<List<DailySummary>>
+
+    // Методы для управления вашими личными продуктами
+    @Query("SELECT * FROM custom_foods ORDER BY name ASC")
+    fun getAllCustomFoods(): Flow<List<CustomFood>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCustomFood(food: CustomFood)
+
+    @Delete
+    suspend fun deleteCustomFood(food: CustomFood)
 }
 
-@Database(entities = [FoodLog::class, DailySummary::class], version = 1, exportSchema = false)
+// Добавили CustomFood в список сущностей БД
+@Database(entities = [FoodLog::class, DailySummary::class, CustomFood::class], version = 1, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun calorieDao(): CalorieDao
 
